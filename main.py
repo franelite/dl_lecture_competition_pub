@@ -410,15 +410,30 @@ def main():
     print(device)
 
     # GloVeのエンベディングファイルのパスを指定
-    glove_embeddings = load_glove_embeddings('./data/glove.6B.300d.txt')
+    glove_embeddings = load_glove_embeddings('/content/data/glove.6B.300d.txt')
 
     # dataloader / model
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor()
+    # transform = transforms.Compose([
+    #     transforms.Resize((224, 224)),
+    #     transforms.ToTensor()
+    # ])
+    # データ拡張を追加
+    train_transform = transforms.Compose([
+        transforms.RandomResizedCrop(224),   # ランダムなリサイズクロップ
+        transforms.RandomHorizontalFlip(),   # 水平反転
+        transforms.RandomRotation(10),       # ランダムな回転
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2),  # カラージッター
+        transforms.ToTensor(),               # テンソル変換
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # 正規化
     ])
-    train_dataset = VQADataset(df_path="./data/train.json", image_dir="./data/train", embeddings_index=glove_embeddings, transform=transform)
-    test_dataset = VQADataset(df_path="./data/valid.json", image_dir="./data/valid", embeddings_index=glove_embeddings, transform=transform, answer=False)
+    test_transform = transforms.Compose([
+        transforms.Resize((224, 224)),       # リサイズ
+        transforms.ToTensor(),               # テンソル変換
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # 正規化
+    ])
+
+    train_dataset = VQADataset(df_path="/content/data/train.json", image_dir="/content/data/train", embeddings_index=glove_embeddings, transform=train_transform)
+    test_dataset = VQADataset(df_path="/content/data/valid.json", image_dir="/content/data/valid", embeddings_index=glove_embeddings, transform=test_transform, answer=False)
     test_dataset.update_dict(train_dataset)
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True, num_workers=2, pin_memory=True)
