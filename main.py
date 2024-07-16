@@ -13,6 +13,8 @@ from torchvision import transforms
 
 from tqdm import tqdm  # プログレスバーを表示しながら学習の進行状況を確認
 
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer  # Hugging Faceのトランスフォーマーモデルをインポート
+
 import numpy as np
 
 
@@ -350,6 +352,29 @@ class VQAModel(nn.Module):
         return x
 
 
+class VQAModelWithTransformers(nn.Module):
+    def __init__(self, model_name="facebook/bart-large"):
+        super().__init__()
+        self.resnet = ResNet18()
+        self.text_encoder = nn.Linear(300, 512)
+        self.fc = nn.Linear(512 + 512, 512)
+        self.answer_generator = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        
+    def forward(self, image, question_embedding):
+        image_feature = self.resnet(image)
+        question_feature = self.text_encoder(question_embedding)
+        x = torch.cat([image_feature, question_feature], dim=1)
+        x = self.fc(x)
+        return x
+
+    def generate_answer(self, question_embedding, max_length=50):
+        inputs = self.tokenizer.encode(" ".join(map(str, question_embedding.tolist())), return_tensors="pt")
+        outputs = self.answer_generator.generate(inputs, max_length=max_length, num_beams=5, early_stopping=True)
+        answer = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        return answer
+
+
 # 4. 学習の実装
 def train(model, dataloader, optimizer, criterion, device):
     model.train()
@@ -440,11 +465,14 @@ def main():
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
 
     # model = VQAModel(vocab_size=len(train_dataset.question2idx)+1, n_answer=len(train_dataset.answer2idx)).to(device)
-    model = VQAModel(embedding_dim=300, n_answer=len(train_dataset.answer2idx)).to(device)
+    # model = VQAModel(embedding_dim=300, n_answer=len(train_dataset.answer2idx)).to(device)
+    model = VQAModelWithTransformers().to(device)
 
     # optimizer / criterion
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)  # 学習率スケジューリング
 
     start_epoch = 0
     num_epoch = 20
@@ -459,21 +487,44 @@ def main():
     except FileNotFoundError:
         print("No checkpoint found, starting from scratch.")
 
+    best_loss = float('inf')
+    patience = 5
+    patience_counter = 0
+
     # train model
-    for epoch in range(num_epoch):
+    for epoch in range(start_epoch, num_epoch):
         train_loss, train_acc, train_simple_acc, train_time = train(model, train_loader, optimizer, criterion, device)
+        val_loss, val_acc, val_simple_acc, val_time = eval(model, test_loader, optimizer, criterion, device)  # 検証データで評価
         print(f"【{epoch + 1}/{num_epoch}】\n"
               f"train time: {train_time:.2f} [s]\n"
               f"train loss: {train_loss:.4f}\n"
               f"train acc: {train_acc:.4f}\n"
-              f"train simple acc: {train_simple_acc:.4f}")
+              f"{train_simple_acc:.4f}\n"
+              f"val time: {val_time:.2f} [s]\n"
+              f"val loss: {val_loss:.4f}\n"
+              f"val acc: {val_acc:.4f}\n"
+              f"val simple acc: {val_simple_acc:.4f}")
         
+        scheduler.step()  # 学習率の更新
+
         # エポックごとにモデルの状態を保存
         torch.save({
             "epoch": epoch + 1,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
         }, "checkpoint.pth")
+
+        # 早期終了のチェック
+        if val_loss < best_loss:
+            best_loss = val_loss
+            patience_counter = 0
+            # ベストモデルの保存
+            torch.save(model.state_dict(), "best_model.pth")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("Early stopping triggered")
+                break
 
         # 提出用ファイルの作成
         model.eval()
